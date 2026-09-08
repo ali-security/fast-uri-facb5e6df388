@@ -1,18 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches:
-     - main
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional selector to scope the test run; empty runs the full suite'
+        required: false
+        type: string
+        default: ''
 
 # This allows a subsequently queued workflow run to interrupt previous runs
 concurrency:
@@ -26,6 +21,7 @@ jobs:
   test-regression-check-node10:
     name: Test compatibility with Node.js 10
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -51,15 +47,24 @@ jobs:
           cp -r ./lib ./node_modules/fast-uri/lib &&
           cp ./index.js ./node_modules/fast-uri/index.js
 
+      # npm 6 (bundled with Node.js 10) applies the repo's `ignore-scripts=true`
+      # to `npm run` too, so `npm run test:unit` would exit 0 without running a
+      # single test. Invoke the tape binary directly instead. `test/*.js` covers
+      # the same files as `test/**/*.js` because `test/fixtures/` holds only JSON.
       - name: Run tests
         run: |
-          npm run test:unit
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            node ./node_modules/.bin/tape ${{ inputs.test-filter }}
+          else
+            node ./node_modules/.bin/tape test/*.js
+          fi
         env:
           NODE_OPTIONS: no-network-family-autoselection
 
   test-browser:
     name: Test browser compatibility
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -93,14 +98,74 @@ jobs:
         run: |
           npm run test:browser:${{ matrix.browser }}
 
+  # Inlined from fastify/workflows/.github/workflows/plugins-ci.yml@v6: a job
+  # that delegates via `uses:` cannot declare `timeout-minutes`. The matrix is
+  # widened to the three host OSes; the reusable workflow only ran ubuntu.
   test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     needs:
       - test-regression-check-node10
     permissions:
-      contents: write
-      pull-requests: write
-    uses: fastify/workflows/.github/workflows/plugins-ci.yml@v6
-    with:
-      license-check: true
-      lint: true
-      node-versions: '["16", "18", "20", "22", "24"]'
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['ubuntu-latest', 'windows-latest', 'macos-latest']
+        node-version: ['16', '18', '20', '22', '24']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: package.json
+          check-latest: true
+
+      - name: Install
+        run: |
+          npm install --ignore-scripts
+
+      # `npm test` chains test:unit and test:typescript, so a filter appended to
+      # it would still run the whole suite; route a non-empty filter through tape.
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx tape ${{ inputs.test-filter }}
+          else
+            npm test
+          fi
+
+  pack:
+    name: Pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - test
+      - test-browser
+      - test-regression-check-node10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Pack
+        run: |
+          npm pack --ignore-scripts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: fast-uri-3.1.5.tgz
+          if-no-files-found: error
