@@ -357,3 +357,72 @@ test('parse does not reject valid authority introducer patterns', (t) => {
     t.notOk(parsed.error, input)
   })
 })
+
+test('CVE-2026-75931: resolve canonicalises the host using the final resolved scheme', (t) => {
+  const cases = [
+    {
+      base: 'http://trusted.example/base',
+      relative: '//127。0。0。1/private',
+      expected: 'http://127.0.0.1/private',
+      expectedHost: '127.0.0.1',
+      description: 'scheme-relative loopback host'
+    },
+    {
+      base: 'https://ex­ample.com/base',
+      relative: 'child',
+      expected: 'https://example.com/child',
+      expectedHost: 'example.com',
+      description: 'host inherited from the base'
+    },
+    {
+      base: 'http://trusted.example/base',
+      relative: 'http://ex​ample.com/',
+      expected: 'http://example.com/',
+      expectedHost: 'example.com',
+      description: 'absolute relative reference'
+    }
+  ]
+
+  t.plan(cases.length * 2)
+
+  cases.forEach(({ base, relative, expected, expectedHost, description }) => {
+    const resolved = fastURI.resolve(base, relative)
+    t.equal(resolved, expected, description)
+    t.equal(fastURI.parse(resolved).host, expectedHost, `${description} reparses consistently`)
+  })
+})
+
+test('CVE-2026-75931: resolve applies domain canonicalisation only when the effective scheme opts in', (t) => {
+  const host = 'ex­ample.com'
+
+  t.plan(2)
+  t.equal(
+    fastURI.resolve('uri://trusted.example/', `//${host}/`),
+    `uri://${host}/`,
+    'an unsupported scheme preserves the host'
+  )
+  t.equal(
+    fastURI.resolve('http://trusted.example/', `//${host}/`, { unicodeSupport: true }),
+    `http://${host}/`,
+    'unicodeSupport preserves the Unicode host'
+  )
+})
+
+test('CVE-2026-75931: resolve throws when the final scheme cannot canonicalise the host', (t) => {
+  const invalidHost = '‍.example'
+  const cases = [
+    ['http://trusted.example/', `//${invalidHost}/`],
+    [`https://${invalidHost}/base`, 'child'],
+    ['http://trusted.example/', `http://${invalidHost}/`]
+  ]
+
+  t.plan(cases.length)
+
+  cases.forEach(([base, relative]) => {
+    t.throws(
+      () => fastURI.resolve(base, relative),
+      /Host's domain name can not be converted to ASCII/,
+      `${base} + ${relative}`
+    )
+  })
+})
