@@ -268,6 +268,12 @@ function canonicalizeHost (parsed, options, schemeHandler, isIP) {
     !options.unicodeSupport &&
     (!schemeHandler || !schemeHandler.unicodeSupport) &&
     parsed.host &&
+    // A complete bracketed IP literal is never a domain name. Handing it to the
+    // WHATWG parser would let a malformed literal be silently rewritten into a
+    // different host (e.g. "[1:2:3:4:5:6:7::8]" -> "[1:2:3:4:5:6:7:8]"), which
+    // is exactly what normalizeIPv6 now refuses to do. An *unterminated*
+    // bracket is not a literal, so it must still fail the domain conversion.
+    !(parsed.host[0] === '[' && parsed.host[parsed.host.length - 1] === ']') &&
     (options.domainHost || (schemeHandler && schemeHandler.domainHost)) &&
     isIP === false &&
     nonSimpleDomain(parsed.host)
@@ -302,6 +308,7 @@ function parseWithStatus (uri, opts) {
 
   let malformedAuthorityOrPort = false
   let malformedHost = false
+  let malformedIPLiteral = false
 
   let isIP = false
   if (options.reference === 'suffix') {
@@ -373,9 +380,16 @@ function parseWithStatus (uri, opts) {
     if (parsed.host) {
       const ipv4result = isIPv4(parsed.host)
       if (ipv4result === false) {
+        const bracketedIPLiteral = parsed.host[0] === '[' && parsed.host[parsed.host.length - 1] === ']'
         const ipv6result = normalizeIPv6(parsed.host)
-        parsed.host = ipv6result.host.toLowerCase()
-        isIP = ipv6result.isIPV6
+        isIP = ipv6result.isIPV6 || ipv6result.isIPVFuture === true
+        malformedIPLiteral = bracketedIPLiteral && ipv6result.error === true
+        parsed.host = isIP ? ipv6result.host : ipv6result.host.toLowerCase()
+
+        if (malformedIPLiteral) {
+          parsed.error = parsed.error || 'URI host is malformed.'
+          malformedAuthorityOrPort = true
+        }
       } else {
         isIP = true
       }
@@ -406,11 +420,12 @@ function parseWithStatus (uri, opts) {
         if (parsed.scheme !== undefined) {
           parsed.scheme = unescape(parsed.scheme)
         }
-        if (parsed.host !== undefined) {
+        if (parsed.host !== undefined && !malformedIPLiteral) {
           // Decode only current unreserved escapes, once. Using unescape() here
           // decodes every escape and lets a nested escape (e.g. %252e -> %2e -> .)
           // reparse as a live delimiter, redirecting to a different host.
-          parsed.host = reescapeHostDelimiters(normalizePercentEncoding(parsed.host, true), isIP)
+          const host = isIP ? parsed.host : normalizePercentEncoding(parsed.host, true)
+          parsed.host = reescapeHostDelimiters(host, isIP)
         }
       }
       if (parsed.path) {
