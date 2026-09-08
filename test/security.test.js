@@ -482,3 +482,80 @@ test('CVE-2026-75899: host conversion failures are not treated as comparable URL
     'resolve propagates a host conversion failure'
   )
 })
+
+test('CVE-2026-76172: a scheme that decodes into reserved delimiters is rejected', (t) => {
+  const malformed = [
+    '%2f%2fevil.example:/pwn',
+    '%2F%2Fevil.example:/pwn',
+    'ht%74p%2f%2fevil.example:/x'
+  ]
+
+  t.plan(malformed.length * 2)
+
+  malformed.forEach((uri) => {
+    t.equal(fastURI.parse(uri).error, 'URI scheme is malformed.', `parse rejects ${uri}`)
+    t.equal(fastURI.normalize(uri), uri, `normalize preserves the failing input ${uri}`)
+  })
+})
+
+test('CVE-2026-76172: resolve throws when a component scheme decodes into delimiters', (t) => {
+  t.plan(2)
+  t.throws(
+    () => fastURI.resolve('%2f%2fevil.example:/pwn', 'child'),
+    /URI scheme is malformed/,
+    'resolve rejects a malformed base scheme'
+  )
+  t.throws(
+    () => fastURI.serialize({ scheme: '%2f%2fevil.example', path: '/pwn' }),
+    /URI scheme is malformed/,
+    'serialize rejects a component scheme that decodes to delimiters'
+  )
+})
+
+test('CVE-2026-76172: a scheme that decodes to a valid scheme is still accepted', (t) => {
+  t.plan(2)
+  t.equal(fastURI.parse('htt%70://example.com/').scheme, 'http', 'harmless encoded scheme decodes to http')
+  t.equal(fastURI.normalize('HTTP://example.com/'), 'http://example.com/', 'scheme is lowercased')
+})
+
+test('CVE-2026-76172: a decoded scheme can not smuggle a new authority downstream', (t) => {
+  const evil = '%2f%2fevil.example:/pwn'
+
+  t.plan(4)
+
+  // Before the fix parse() unescaped the scheme in place, so normalize() emitted
+  // "//evil.example:/pwn" — a string that reparses with "evil.example" as the
+  // authority (host-allowlist bypass).
+  const normalized = fastURI.normalize(evil)
+  t.equal(normalized, evil, 'normalize does not rewrite the scheme into an authority')
+  t.notEqual(fastURI.parse(normalized).host, 'evil.example', 'the round trip never yields a new host')
+  t.equal(fastURI.equal(evil, evil, {}), false, 'equal refuses a URI whose scheme is malformed')
+  t.throws(
+    () => fastURI.resolve('https://trusted.example/', evil),
+    /URI scheme is malformed/,
+    'resolve rejects a malformed relative scheme'
+  )
+})
+
+test('CVE-2026-76172: a scheme handler can not install a malformed scheme while serializing', (t) => {
+  t.plan(1)
+
+  fastURI.SCHEMES['x-cve-2026-76172'] = {
+    scheme: 'x-cve-2026-76172',
+    parse: (component) => component,
+    serialize: (component) => {
+      component.scheme = '%2f%2fevil.example'
+      return component
+    }
+  }
+
+  try {
+    t.throws(
+      () => fastURI.serialize({ scheme: 'x-cve-2026-76172', path: '/pwn' }),
+      /URI scheme is malformed/,
+      'the scheme is revalidated after scheme specific serialization'
+    )
+  } finally {
+    delete fastURI.SCHEMES['x-cve-2026-76172']
+  }
+})
